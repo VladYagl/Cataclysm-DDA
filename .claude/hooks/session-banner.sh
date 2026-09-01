@@ -11,22 +11,46 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 md="$repo/CLAUDE.md"
 index="$repo/.claude/memory/MEMORY.md"
 
-head_sha="$(git -C "$repo" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+# Everything the reference clone adds lives in these two paths; the rest of
+# the tree is upstream's. Excluding them separates "the game changed" from
+# "we committed a note", which HEAD alone cannot distinguish.
+ours=(':(exclude)CLAUDE.md' ':(exclude).claude')
+
+git_at() { git -C "$repo" "$@" 2>/dev/null; }
+
+head_sha="$(git_at rev-parse --short=10 HEAD || echo unknown)"
+# The newest commit reachable from HEAD that touches the game tree. Our own
+# commits never move it, so this — not HEAD — is the sha a citation names
+# and the sha the pin is compared against.
+base_sha="$(git_at rev-list -1 --abbrev-commit --abbrev=10 HEAD -- . "${ours[@]}")"
+[ -n "$base_sha" ] || base_sha="$head_sha"
+
 # The pin CLAUDE.md says answers were last verified at.
 pin="$(sed -n 's/^Current reference point: .*`\([0-9a-f]\{7,\}\)`.*/\1/p' "$md" 2>/dev/null | head -1)"
 ver="$(sed -n 's/^Current reference point: `\([^`]*\)`.*/\1/p' "$md" 2>/dev/null | head -1)"
 
 if [ -z "$pin" ]; then
-  drift="HEAD is at $head_sha. CLAUDE.md does not pin a reference point to compare it against."
-elif [ "${head_sha#"$pin"}" != "$head_sha" ] || [ "${pin#"$head_sha"}" != "$pin" ]; then
-  drift="HEAD is at $head_sha, which matches the reference point pinned in CLAUDE.md."
+  drift="The game tree is at $base_sha. CLAUDE.md does not pin a reference point to compare it against."
+elif [ "${base_sha#"$pin"}" != "$base_sha" ] || [ "${pin#"$base_sha"}" != "$pin" ]; then
+  drift="The game tree is at $base_sha, which matches the reference point pinned in CLAUDE.md. Cite that sha, not HEAD."
 else
-  drift="HEAD is at $head_sha, which has drifted from the $pin pinned in CLAUDE.md, so line numbers and counts need to be re-derived."
+  drift="The game tree is at $base_sha, which has drifted from the $pin pinned in CLAUDE.md, so line numbers and counts need to be re-derived."
 fi
 
+# HEAD carrying reference tooling on top of the game tree is the normal
+# state, not drift — but the two shas differ, so say which one to cite.
+[ "$head_sha" != "$base_sha" ] &&
+  drift="$drift"$'\n'"HEAD is $head_sha, which adds only the reference tooling (CLAUDE.md and .claude/) on top of that."
+
+# A dirty game tree is a real problem; uncommitted notes are just unsaved
+# work, and memory only persists once it is committed.
+game_dirty="$(git_at status --porcelain -- . "${ours[@]}")"
+ours_dirty="$(git_at status --porcelain -- CLAUDE.md .claude)"
 dirty=""
-[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] &&
-  dirty=$'\n'"The working tree is dirty, which is unexpected for a clone meant to stay unmodified."
+[ -n "$game_dirty" ] &&
+  dirty=$'\n'"The game tree has uncommitted changes, which is unexpected for a clone meant to stay unmodified."
+[ -n "$ours_dirty" ] &&
+  dirty="$dirty"$'\n'"CLAUDE.md or .claude/ has uncommitted changes; memory and tooling only persist for other sessions once committed."
 
 banner=$'\n'"Welcome to the Cataclysm-DDA reference clone${ver:+, currently on $ver}. \
 This is a read-only checkout, kept for answering questions about game mechanics from source.
@@ -46,7 +70,7 @@ fi
 context="Session is in the Cataclysm-DDA reference clone at $repo (see its CLAUDE.md).
 $drift
 Questions here are about CDDA game mechanics, to be answered from source rather than from memory.
-Open your first reply of the session with a one-line marker: [CDDA ref - HEAD $head_sha] so the user can see this context was picked up.${memory}"
+Open your first reply of the session with a one-line marker: [CDDA ref - $base_sha] so the user can see this context was picked up.${memory}"
 
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg m "$banner" --arg c "$context" \
