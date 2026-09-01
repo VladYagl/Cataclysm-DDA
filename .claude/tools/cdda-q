@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""cdda-q — query the Cataclysm-DDA JSON data layer without writing a script.
+
+Indexes every top-level JSON object in the repo's data tree, recording the
+file and the line the object starts on, so results are citable as file:line.
+
+The cache is stamped with the repo HEAD sha and the newest source mtime and
+rebuilds itself whenever either moves, so a stale index cannot silently rot
+an answer. A full rebuild costs well under a second.
+
+    cdda-q flag SUN_GLASSES
+    cdda-q quality SURFACE
+    cdda-q id sunglasses_eye
+    cdda-q type proficiency
+    cdda-q field min_strength
+    cdda-q find 'e.get("type")=="ITEM" and (e.get("min_strength") or 0) > 10'
+    cdda-q find 'has_flag("FIX_NEARSIGHT")' --show flags,armor
+    cdda-q find 'e.get("workbench")' --show workbench --mods
+
+CAVEAT: the index stores each object exactly as written in JSON. It does NOT
+resolve "copy-from" inheritance, "extend"/"delete", or mod overrides of
+vanilla ids. An item can inherit a flag it does not literally list, so a
+negative result is a hint to check the copy-from parent, never a proof.
+"""
+
+import argparse
+import json
+import os
+import pickle
+import subprocess
+import sys
+
+# The tool lives at <repo>/.claude/tools/cdda-q, so the repo is three levels
+# up from this file. CDDA_REPO overrides that for an out-of-tree checkout.
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.environ.get("CDDA_REPO") or os.path.dirname(os.path.dirname(HERE))
+CACHE = os.path.join(HERE, ".cdda-index.pickle")
+
+# Vanilla first; mods are indexed too but tagged so they can be filtered out,
+# because presenting modded behavior as base-game behavior is a real hazard.
+ROOTS = ["data/json", "data/core", "data/mods"]
+
+
+def scan_object_lines(text):
+    """Line number of each top-level object in a JSON array, in order.
+
+    A plain json.load loses position, and grepping for the id afterwards
+    misfires on nested {"id": ...} (quality entries, requirement blocks).
+    Tracking brace depth over the raw text is exact.
+    """
+    lines, depth, in_str, esc, line = [], 0, False, False, 1
+    for ch in text:
+        if ch == "\n":
+            line += 1
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+            if ch == "{" and depth == 2:
+                lines.append(line)
+        elif ch in "}]":
+            depth -= 1
+    return lines
+
+
+def iter_files():
+    for root in ROOTS:
+        base = os.path.join(REPO, root)
+        for dirpath, _, filenames in os.walk(base):
+            for fn in filenames:
+                if fn.endswith(".json"):
+                    yield os.path.join(dirpath, fn)
+
+
+def build():
+    rows = []
+    for path in iter_files():
+        rel = os.path.relpath(path, REPO)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            data = json.loads(text)
+        except Exception:
+            continue  # a handful of data files are intentionally not objects
+        is_mod = rel.startswith("data/mods/")
+        if isinstance(data, list):
+            starts = scan_object_lines(text)
+            objs = [d for d in data if isinstance(d, dict)]
+            # scan_object_lines counts every top-level object; if the counts
+            # disagree the file has a shape we cannot place, so fall back to 1.
+            if len(starts) != len(objs):
+                starts = [1] * len(objs)
+            for obj, ln in zip(objs, starts):
+                rows.append((rel, ln, is_mod, obj))
+        elif isinstance(data, dict):
+            rows.append((rel, 1, is_mod, data))
+    return rows
+
+
+def stamp():
+    head = subprocess.run(
+        ["git", "-C", REPO, "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    newest = 0.0
+    for path in iter_files():
+        try:
+            newest = max(newest, os.path.getmtime(path))
+        except OSError:
+            pass
+    return head, round(newest, 3)
+
+
+def load(rebuild=False):
+    cur = stamp()
+    if not rebuild and os.path.exists(CACHE):
+        try:
+            with open(CACHE, "rb") as fh:
+                cached = pickle.load(fh)
+            if cached.get("stamp") == cur:
+                return cached["rows"], cur[0]
+        except Exception:
+            pass
+    rows = build()
+    try:
+        with open(CACHE, "wb") as fh:
+            pickle.dump({"stamp": cur, "rows": rows}, fh, protocol=4)
+    except OSError:
+        pass
+    return rows, cur[0]
+
+
+def ent_name(e):
+    n = e.get("name")
+    if isinstance(n, dict):
+        return n.get("str") or n.get("str_sp") or ""
+    return n if isinstance(n, str) else ""
+
+
+def ent_flags(e):
+    out = list(e.get("flags") or [])
+    for key in ("extend", "delete"):
+        sub = e.get(key)
+        if isinstance(sub, dict):
+            out += list(sub.get("flags") or [])
+    return out
+
+
+def ent_quals(e):
+    """Qualities as (id, level); JSON allows both [["CUT",2]] and [{"id":...}]."""
+    out = []
+    for q in e.get("qualities") or []:
+        if isinstance(q, list) and len(q) >= 2:
+            out.append((q[0], q[1]))
+        elif isinstance(q, dict):
+            out.append((q.get("id"), q.get("level")))
+    return out
+
+
+# eval() runs with __builtins__ stripped, so whatever a --find expression
+# needs has to be handed to it explicitly.
+SAFE = {
+    "any": any, "all": all, "len": len, "isinstance": isinstance,
+    "str": str, "int": int, "float": float, "bool": bool,
+    "list": list, "dict": dict, "set": set, "tuple": tuple,
+    "sorted": sorted, "sum": sum, "max": max, "min": min, "abs": abs,
+    "enumerate": enumerate, "zip": zip, "range": range, "round": round,
+}
+
+
+def render(rel, ln, e, show):
+    ident = e.get("id") or e.get("abstract") or e.get("result") or ""
+    if isinstance(ident, list):
+        ident = ",".join(str(i) for i in ident)
+    parts = [f"{rel}:{ln}", str(ident)]
+    nm = ent_name(e)
+    if nm:
+        parts.append(f"({nm})")
+    for field in show:
+        if field in e:
+            val = json.dumps(e[field], ensure_ascii=False)
+            parts.append(f"{field}={val}")
+    return "  ".join(parts)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="cdda-q", add_help=True)
+    ap.add_argument("mode", choices="find id flag quality type field rebuild".split())
+    ap.add_argument("arg", nargs="?", default="")
+    ap.add_argument("--show", default="", help="comma-separated fields to print")
+    ap.add_argument("--limit", type=int, default=200)
+    ap.add_argument("--mods", action="store_true", help="include data/mods (off by default)")
+    ap.add_argument("--only-mods", action="store_true")
+    args = ap.parse_args()
+
+    rows, head = load(rebuild=(args.mode == "rebuild"))
+    if args.mode == "rebuild":
+        print(f"indexed {len(rows)} objects at {head[:10]}")
+        return
+
+    show = [s for s in args.show.split(",") if s]
+    a = args.arg
+
+    if args.mode == "find":
+        code = compile(a, "<find>", "eval")
+    hits, shown, errors = 0, 0, []
+    for rel, ln, is_mod, e in rows:
+        if is_mod and not (args.mods or args.only_mods):
+            continue
+        if args.only_mods and not is_mod:
+            continue
+        try:
+            if args.mode == "find":
+                env = {
+                    "e": e, "f": rel, "l": ln,
+                    "name": ent_name(e), "flags": ent_flags(e),
+                    "quals": ent_quals(e),
+                    "has_flag": lambda x, _e=e: x in ent_flags(_e),
+                    "qual": lambda x, _e=e: next(
+                        (lv for qid, lv in ent_quals(_e) if qid == x), None),
+                }
+                ok = bool(eval(code, {"__builtins__": SAFE}, env))
+            elif args.mode == "id":
+                ok = e.get("id") == a or e.get("abstract") == a
+            elif args.mode == "flag":
+                ok = a in ent_flags(e)
+            elif args.mode == "quality":
+                ok = any(qid == a for qid, _ in ent_quals(e))
+            elif args.mode == "type":
+                ok = e.get("type") == a
+            elif args.mode == "field":
+                ok = a in e
+        except Exception as exc:
+            # Never let a broken expression masquerade as "no results" — that
+            # is indistinguishable from a real negative finding.
+            msg = f"{type(exc).__name__}: {exc}"
+            if msg not in errors:
+                errors.append(msg)
+            ok = False
+        if not ok:
+            continue
+        hits += 1
+        if shown >= args.limit:
+            continue
+        shown += 1
+        if args.mode == "id":
+            print(f"### {rel}:{ln}")
+            print(json.dumps(e, indent=1, ensure_ascii=False))
+        elif args.mode == "quality":
+            lv = next((l for q, l in ent_quals(e) if q == a), None)
+            print(render(rel, ln, e, show) + f"  {a}={lv}")
+        else:
+            print(render(rel, ln, e, show))
+
+    scope = "mods" if args.only_mods else ("vanilla+mods" if args.mods else "vanilla")
+    extra = f", showing {shown}" if hits > shown else ""
+    print(f"-- {hits} hit(s) [{scope}] @ {head[:10]}{extra}", file=sys.stderr)
+    if errors:
+        print(f"!! expression raised on some objects — {hits} hits may be "
+              f"an undercount:", file=sys.stderr)
+        for msg in errors[:5]:
+            print(f"!!   {msg}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

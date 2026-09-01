@@ -1,0 +1,6 @@
+# Rebuilt on demand from the data tree (sub-second), stamped with the repo
+# HEAD sha, and 48M — never commit it.
+tools/.cdda-index.pickle
+
+# ctags index, built on demand per CLAUDE.md.
+.tags
