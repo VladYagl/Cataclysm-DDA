@@ -41,5 +41,8 @@ Routing, system mechanics, and traps — not per-question answers. See
   skill field; the highest melee damage type picks the skill.
 - [CDDA item faults system](cdda-item-faults-system.md) — fault groups,
   damage mods, repairs, and a documented field with no caller.
+- [CDDA armor absorption and ablative plates](cdda-armor-absorption-and-ablative.md)
+  — the design doc that maps the whole pipeline, and how plate inserts
+  and `non_functional` transforms work.
 - [CDDA health/lifestyle system](cdda-health-lifestyle-system.md) — the
   hidden health stat, its BMI penalties, and the wake-up message bands.
