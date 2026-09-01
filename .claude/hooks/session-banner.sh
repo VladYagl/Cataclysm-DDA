@@ -56,6 +56,21 @@ banner=$'\n'"Welcome to the Cataclysm-DDA reference clone${ver:+, currently on $
 This is a read-only checkout, kept for answering questions about game mechanics from source.
 ${drift}${dirty}"
 
+# Record what .claude/memory/ looked like when this session started, so
+# the Stop hook in memory-check.sh can tell whether the session actually
+# wrote anything down. Reading stdin is guarded: run by hand from a
+# terminal there is no payload, and cat would hang waiting for one.
+if [ -r "$repo/.claude/hooks/lib.sh" ]; then
+  # shellcheck source=lib.sh
+  . "$repo/.claude/hooks/lib.sh"
+  payload=""
+  [ -t 0 ] || payload="$(cat)"
+  sid="$(hook_json_field "$payload" session_id)"
+  if [ -n "$sid" ] && state_dir="$(hook_state_dir)"; then
+    hook_memory_fingerprint > "$state_dir/base-$sid"
+  fi
+fi
+
 # The memory index travels in the repo rather than in the host's auto-memory,
 # so a session on any machine gets the same routing knowledge. Inject it.
 memory=""

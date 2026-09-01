@@ -4,3 +4,7 @@ tools/.cdda-index.pickle
 
 # ctags index, built on demand per CLAUDE.md.
 .tags
+
+# Per-session hook scratch: what memory looked like at session start.
+# Meaningless to any other session, and prunes itself after a week.
+.state/

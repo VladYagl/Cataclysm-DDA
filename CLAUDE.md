@@ -171,23 +171,50 @@ behavior as base-game behavior.
 
 ## Recording what you learn
 
-**Memory is not an answer cache.** Do not write an entry to make the same
-question cheaper next time; write one only when it makes a *different*
-question cheaper. After answering, ask what was slow to **find**, not
-what the answer was.
+**Memory is not an answer cache.** An entry earns its place by making a
+*different* question cheaper, never the same one again. After answering,
+ask what was slow to **find**, not what the answer turned out to be.
 
-Worth saving: routing and detours, how a core system works in general,
-and traps that produce confidently wrong answers. Not worth saving: the
-answer itself, item values, per-item tables, anything re-derivable in one
-`cdda-q` call.
+Write one when any of these is true. They are symptoms, checkable
+against what actually just happened:
 
-Prefer extending an existing system entry over adding a sibling. Keep
-memory CDDA-specific — nothing here belongs in a host's global
+- the obvious first grep came back empty and the real route was
+  elsewhere — furniture qualities reached through a pseudo-item;
+- bounding the answer took more than two hops;
+- a plausible-looking answer would have been wrong — a flag in
+  `flags.json` that no C++ ever reads;
+- the entry point was something you did not know existed: a second doc
+  directory, a registry, a loader table.
+
+Otherwise write nothing. Still not worth saving: the answer itself, item
+values, per-item tables, anything re-derivable in one `cdda-q` call.
+
+`.claude/tools/cdda-remember` does the three steps that get skipped at
+the end of an answer — write the entry, index it, commit it:
+
+```sh
+.claude/tools/cdda-remember check vehicle power drain
+.claude/tools/cdda-remember new cdda-vehicle-power-drain \
+  --section "System mechanics" --summary "<one line>" <<'MD'
+<the entry body>
+MD
+```
+
+Run `check` first. `new` refuses a near-duplicate anyway, because
+extending an existing system entry beats a pile of siblings. Entries
+carry no session id: nothing host-specific outlives the host that wrote
+it.
+
+`.claude/hooks/memory-check.sh` asks about this once per session, on the
+Stop event, and only when the session searched the tree in earnest and
+wrote nothing. "Nothing worth recording" is a legitimate answer to it;
+inventing an entry to satisfy it is not.
+
+Keep memory CDDA-specific — nothing here belongs in a host's global
 `CLAUDE.md`. Durable, general orientation rules go in this file; memory
 holds the more specific layer beneath it.
 
 Entries live in `.claude/memory/`, one file each, indexed by
-`.claude/memory/MEMORY.md`. **Write the entry there and commit it** —
-an uncommitted entry is lost to every other session, and on this machine
-the host's auto-memory path is a symlink to that same directory, so
-there is exactly one copy to keep straight.
+`.claude/memory/MEMORY.md`. **Committing is half the job** — an
+uncommitted entry is lost to every other session, and an unpushed one
+never reaches another machine.

@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""cdda-remember — write a routing-memory entry, index it, and commit it.
+
+Memory only reaches another session once the entry is written, listed in
+MEMORY.md and committed. Doing that by hand is three fiddly steps at the
+end of an answer, which is exactly when it gets skipped, so this does all
+three in one call:
+
+    cdda-remember new cdda-vehicle-power-drain \
+        --section "System mechanics" \
+        --summary "where vehicle power draw is summed, and the two \
+                   places alternators are special-cased" <<'MD'
+    <the entry body, in Markdown>
+    MD
+
+    cdda-remember check vehicle power drain    # what is already close
+    cdda-remember sections                     # headings MEMORY.md has
+
+`new` refuses to create an entry that looks like one already present:
+CLAUDE.md prefers extending a system entry over growing a pile of
+siblings, and a near-duplicate is the failure mode that gets memory
+ignored. Pass --force when the overlap is genuinely superficial.
+
+Entries carry no session id. The frontmatter is name/description plus a
+modified stamp; anything host-specific dies with the host that wrote it.
+"""
+
+import argparse
+import datetime as dt
+import re
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+MEM = REPO / ".claude" / "memory"
+INDEX = MEM / "MEMORY.md"
+
+STOP = {
+    "cdda", "the", "and", "for", "with", "how", "what", "where", "why",
+    "its", "it", "is", "are", "was", "from", "that", "this", "into",
+    "than", "then", "when", "which", "you", "your", "not", "but", "all",
+    "one", "two", "does", "did", "can", "any", "per", "via", "out",
+}
+
+
+def tokens(text):
+    return {w for w in re.split(r"[^a-z0-9]+", text.lower())
+            if len(w) > 2 and w not in STOP}
+
+
+def entries():
+    for path in sorted(MEM.glob("*.md")):
+        if path.name == "MEMORY.md":
+            continue
+        text = path.read_text(encoding="utf-8")
+        head = text.split("---", 2)[1] if text.startswith("---") else ""
+        yield path, head.lower(), text.lower()
+
+
+def related(query):
+    """Entries sharing vocabulary with the query, worst-to-best scored.
+
+    A hit in the frontmatter (name, description) counts double: those are
+    what the entry claims to be about, while a body hit may be incidental.
+    """
+    want = tokens(query)
+    hits = []
+    for path, head, body in entries():
+        score = sum(2 if w in head else 1 for w in want if w in body)
+        if score:
+            hits.append((score, path.stem))
+    return sorted(hits, reverse=True)
+
+
+def read_index():
+    if not INDEX.exists():
+        sys.exit(f"no index at {INDEX}")
+    return INDEX.read_text(encoding="utf-8").splitlines()
+
+
+def sections(lines):
+    return [ln[3:].strip() for ln in lines if ln.startswith("## ")]
+
+
+def splice(lines, section, bullet):
+    """Append a bullet to the end of a section, keeping one blank line."""
+    names = [s.lower() for s in sections(lines)]
+    if section.lower() not in names:
+        sys.exit("no such section: %s\navailable: %s"
+                 % (section, ", ".join(sections(lines))))
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("## ") and ln[3:].strip().lower() == section.lower())
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[:end] + bullet.splitlines() + lines[end:], end + 1
+
+
+def title_from(slug):
+    words = slug.split("-")
+    if words and words[0] == "cdda":
+        return "CDDA " + " ".join(words[1:])
+    return " ".join(words)
+
+
+def git(*args):
+    return subprocess.run(("git", "-C", str(REPO)) + args,
+                          capture_output=True, text=True)
+
+
+def cmd_new(args):
+    if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", args.slug):
+        sys.exit("slug must be lowercase words joined by dashes")
+    path = MEM / f"{args.slug}.md"
+    if path.exists():
+        sys.exit(f"{path} already exists — edit it directly; extending an "
+                 "entry beats adding a sibling")
+
+    body = sys.stdin.read().strip()
+    if not body:
+        sys.exit("no body on stdin — pipe the entry text in")
+
+    summary = " ".join(args.summary.split())
+    near = [h for h in related(f"{args.slug} {summary}") if h[0] >= 4]
+    if near and not args.force:
+        listed = "\n".join(f"  {score:>3}  {slug}" for score, slug in near[:5])
+        sys.exit("this overlaps entries that already exist:\n" + listed +
+                 "\n\nextend one of them instead, or re-run with --force if "
+                 "the overlap is only vocabulary")
+
+    title = args.title or title_from(args.slug)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(
+        "---\n"
+        f"name: {args.slug}\n"
+        f'description: "{summary}"\n'
+        "metadata:\n"
+        "  node_type: memory\n"
+        "  type: reference\n"
+        f"  modified: {stamp}\n"
+        "---\n\n" + body + "\n",
+        encoding="utf-8")
+
+    bullet = textwrap.fill(f"- [{title}]({args.slug}.md) — {summary}",
+                           width=72, subsequent_indent="  ")
+    lines, line_no = splice(read_index(), args.section, bullet)
+    INDEX.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print(f"wrote {path.relative_to(REPO)}")
+    print(f"indexed at {INDEX.relative_to(REPO)}:{line_no} "
+          f"under '{args.section}'")
+
+    if args.no_commit:
+        print("not committed (--no-commit) — memory only reaches other "
+              "sessions once it is committed")
+        return
+    message = args.message or "memory: " + title.removeprefix("CDDA ")
+    git("add", "--", str(path), str(INDEX))
+    done = git("commit", "-m", message, "--", str(path), str(INDEX))
+    if done.returncode:
+        sys.exit(done.stderr.strip() or "commit failed")
+    print(git("log", "-1", "--format=committed %h %s").stdout.strip())
+
+
+def cmd_check(args):
+    hits = related(" ".join(args.words))
+    if not hits:
+        print("nothing related — a new entry is the right move")
+        return
+    for score, slug in hits[:8]:
+        print(f"{score:>3}  {slug}")
+
+
+def cmd_sections(args):
+    for name in sections(read_index()):
+        print(name)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    new = sub.add_parser("new", help="write, index and commit an entry")
+    new.add_argument("slug", help="file stem, e.g. cdda-vehicle-power-drain")
+    new.add_argument("--section", required=True,
+                     help="MEMORY.md heading to index it under")
+    new.add_argument("--summary", required=True,
+                     help="one-line index blurb; also the description")
+    new.add_argument("--title", help="index link text (default: from slug)")
+    new.add_argument("--message", help="commit message (default: memory: …)")
+    new.add_argument("--force", action="store_true",
+                     help="write even though a near-duplicate exists")
+    new.add_argument("--no-commit", action="store_true")
+    new.set_defaults(func=cmd_new)
+
+    chk = sub.add_parser("check", help="list entries close to some words")
+    chk.add_argument("words", nargs="+")
+    chk.set_defaults(func=cmd_check)
+
+    sec = sub.add_parser("sections", help="list MEMORY.md headings")
+    sec.set_defaults(func=cmd_sections)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
