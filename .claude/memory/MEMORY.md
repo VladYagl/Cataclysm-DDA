@@ -47,5 +47,8 @@ Routing, system mechanics, and traps — not per-question answers. See
 - [CDDA armor absorption and ablative plates](cdda-armor-absorption-and-ablative.md)
   — the design doc that maps the whole pipeline, and how plate inserts
   and `non_functional` transforms work.
+- [CDDA skill XP system](cdda-skill-xp-system.md) — practical vs
+  theoretical levels, the XP curve, who trains which, and the book
+  `read_skill` grep trap.
 - [CDDA health/lifestyle system](cdda-health-lifestyle-system.md) — the
   hidden health stat, its BMI penalties, and the wake-up message bands.
