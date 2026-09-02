@@ -26,6 +26,9 @@ Routing, system mechanics, and traps — not per-question answers. See
   buckets that answer "where do I get X".
 - [CDDA tool quality sources](cdda-tool-quality-sources.md) — furniture
   satisfies qualities through a pseudo-item, so the obvious grep misses.
+- [CDDA gun magazine lookup](cdda-gun-magazine-lookup.md) — magwell
+  `item_restriction` is a whitelist, guns spawn with their default mag,
+  and the magazine loot-group tiers.
 - [CDDA EOC and math lookup](cdda-eoc-and-math-lookup.md) — tracing a
   JSON string or `u_*()` math function back to the C++ behind it.
 
