@@ -30,7 +30,8 @@ Routing, system mechanics, and traps — not per-question answers. See
   `item_restriction` is a whitelist, guns spawn with their default mag,
   and the magazine loot-group tiers.
 - [CDDA EOC and math lookup](cdda-eoc-and-math-lookup.md) — tracing a
-  JSON string or `u_*()` math function back to the C++ behind it.
+  JSON string or `u_*()` math function back to the C++ behind it; which
+  EOCs actually run, and effects whose intensity is driven by a vitamin.
 
 ## System mechanics
 
